@@ -1,0 +1,16 @@
+{
+  "name": "gesture-synth",
+  "displayName": "Gesture Synth",
+  "description": "Play a synth and a guitar with hand gestures using your webcam",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "gestureSynth.start", "title": "Gesture Synth: Start" },
+      { "command": "gestureSynth.stop", "title": "Gesture Synth: Stop" }
+    ]
+  }
+}

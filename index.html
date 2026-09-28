@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gesture Synth</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0d0f14; color: #e6e9ef; font-family: system-ui, sans-serif;
+         display: flex; flex-direction: column; align-items: center; padding: 16px; gap: 12px; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  #stage { position: relative; width: min(960px, 100%); aspect-ratio: 16/9; background: #000;
+           border-radius: 12px; overflow: hidden; border: 1px solid #2a2f3a; }
+  video, #hands { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  video { opacity: .85; }
+  #wave { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 30%; }
+  #big { position: absolute; right: 18px; bottom: 16px; font-size: 64px; font-weight: 800; color: #ffd400;
+         text-shadow: 0 0 18px #ffb300aa, 0 2px 4px #000; font-family: Georgia, serif; }
+  #steps { position: absolute; left: 12px; top: 10px; display: flex; gap: 6px; }
+  .step { padding: 4px 10px; border-radius: 6px; background: #00000088; color: #ffffffaa; font: 700 14px Georgia, serif; }
+  .step.on { background: #ffd400; color: #000; }
+  #start { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 14px 28px;
+           font-size: 16px; border: 0; border-radius: 10px; cursor: pointer; background: #ffd400; color: #000; font-weight: 700; }
+  #msg { position: absolute; top: 46px; left: 10px; right: 10px; text-align: center; font-size: 13px; color: #ffb4b4; }
+  #hud { display: flex; gap: 10px; width: min(960px, 100%); }
+  .card { flex: 1; background: #161a22; border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; }
+  .card small { color: #8b93a5; display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+  .card b { font-size: 26px; }
+  select { background: #0d0f14; color: #e6e9ef; border: 1px solid #2a2f3a; border-radius: 6px; padding: 6px; font-size: 16px; }
+  p, table { margin: 0; color: #9aa3b5; font-size: 13px; width: min(960px, 100%); line-height: 1.6; }
+  table { border-collapse: collapse; text-align: center; }
+  td, th { border: 1px solid #2a2f3a; padding: 4px; }
+</style>
+</head>
+<body>
+<h1>✋🎹 Gesture Synth – count on your fingers</h1>
+
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="hands"></canvas>
+  <canvas id="wave"></canvas>
+  <div id="steps"></div>
+  <div id="big">–</div>
+  <button id="start">Start camera &amp; sound</button>
+  <div id="msg"></div>
+</div>
+
+<div id="hud">
+  <div class="card"><small>Fingers up</small><b id="hCount">0</b></div>
+  <div class="card"><small>Chord</small><b id="hChord">–</b></div>
+  <div class="card"><small>Key</small>
+    <select id="key">
+      <option value="0">C major</option><option value="7">G major</option><option value="5">F major</option>
+      <option value="2">D major</option><option value="9">A major</option><option value="4">E major</option>
+    </select>
+  </div>
+</div>
+
+<p><b>Hold up fingers on either hand or both</b> – the total number picks the chord (count the thumb too).
+Change the number to change the chord; lower your hands to stop.
+Try the Let It Be progression: <b>1 → 5 → 6 → 4</b> (I · V · vi · IV), e.g. one finger, then a full hand, then a full hand + one, then four.</p>
+<table>
+  <tr><th>Fingers</th><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8–10</td></tr>
+  <tr><th>Chord</th><td>I</td><td>ii</td><td>iii</td><td>IV</td><td>V</td><td>vi</td><td>vii°</td><td>I–iii, octave up</td></tr>
+</table>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), hc = $('hands'), hg = hc.getContext('2d');
+const wave = $('wave'), wg = wave.getContext('2d');
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+// ---------- music theory ----------
+const SCALE = [0, 2, 4, 5, 7, 9, 11];
+const NUMERALS = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°'];
+const SUFFIX = ['', 'm', 'm', '', '', 'm', 'dim'];
+const NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const scaleSemi = d => SCALE[d % 7] + 12 * Math.floor(d / 7);
+const keyOffset = () => parseInt($('key').value, 10);
+
+// numeral buttons along the top
+NUMERALS.forEach((n, i) => {
+  const el = document.createElement('div'); el.className = 'step'; el.id = 'step' + i; el.textContent = n;
+  $('steps').appendChild(el);
+});
+
+// ---------- audio ----------
+let ctx, bus, analyser, current = null;
+
+function initAudio() {
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const comp = ctx.createDynamicsCompressor(); comp.connect(ctx.destination);
+  const master = ctx.createGain(); master.gain.value = 0.8; master.connect(comp);
+
+  const conv = ctx.createConvolver();
+  const len = ctx.sampleRate * 2.2;
+  const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
+  }
+  conv.buffer = buf;
+  const wet = ctx.createGain(); wet.gain.value = 0.3; conv.connect(wet); wet.connect(master);
+
+  bus = ctx.createGain(); bus.connect(master); bus.connect(conv);
+  analyser = ctx.createAnalyser(); analyser.fftSize = 1024; bus.connect(analyser);
+}
+
+function stopCurrent(release = 0.25) {
+  if (!current) return;
+  const old = current, now = ctx.currentTime;
+  old.g.gain.cancelScheduledValues(now);
+  old.g.gain.setTargetAtTime(0, now, release / 3);
+  setTimeout(() => { old.oscs.forEach(o => { try { o.stop(); } catch (e) {} }); old.g.disconnect(); }, release * 1000 + 600);
+  current = null;
+}
+
+function playChord(count) {
+  stopCurrent();
+  if (count === 0) return;
+  const idx = (count - 1) % 7;
+  const octave = Math.floor((count - 1) / 7);
+  const key = keyOffset();
+  let root = SCALE[idx]; if (root >= 6) root -= 12;          // keep voicing compact
+  const tones = [0, 2, 4].map(s => scaleSemi(idx + s) - (SCALE[idx] >= 6 ? 12 : 0));
+
+  const g = ctx.createGain(); g.gain.value = 0;
+  const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 2200; filt.Q.value = 1.2;
+  filt.connect(g); g.connect(bus);
+
+  const oscs = [];
+  const add = (type, midi, amp, detune = 0) => {
+    const o = ctx.createOscillator(); o.type = type; o.frequency.value = mtof(midi); o.detune.value = detune;
+    const a = ctx.createGain(); a.gain.value = amp;
+    o.connect(a); a.connect(filt); o.start(); oscs.push(o);
+  };
+  tones.forEach(t => {
+    const m = 60 + key + t + 12 * octave;
+    add('sawtooth', m, 0.07, -6);
+    add('sawtooth', m, 0.07, +6);
+  });
+  add('sine', 36 + key + root + 12 * octave, 0.25);          // bass
+  g.gain.setTargetAtTime(0.9, ctx.currentTime, 0.03);
+  current = { g, oscs, idx };
+}
+
+// ---------- finger counting ----------
+function fingersUp(lm) {
+  let n = 0;
+  const tips = [8, 12, 16, 20], pips = [6, 10, 14, 18];
+  for (let i = 0; i < 4; i++) if (dist(lm[tips[i]], lm[0]) > dist(lm[pips[i]], lm[0]) * 1.05) n++;
+  if (dist(lm[4], lm[17]) > dist(lm[3], lm[17]) * 1.05 && dist(lm[4], lm[9]) > dist(lm[3], lm[9])) n++;   // thumb
+  return n;
+}
+
+let committed = 0, candidate = 0, stable = 0;
+function onResults(results) {
+  if (hc.width !== video.videoWidth) { hc.width = video.videoWidth; hc.height = video.videoHeight; }
+  hg.clearRect(0, 0, hc.width, hc.height);
+
+  let total = 0;
+  for (const lm of results.multiHandLandmarks || []) {
+    drawConnectors(hg, lm, HAND_CONNECTIONS, { color: '#ffd400', lineWidth: 4 });
+    drawLandmarks(hg, lm, { color: '#fff', lineWidth: 1, radius: 3 });
+    total += fingersUp(lm);
+  }
+  total = Math.min(total, 10);
+
+  // debounce so a flicker doesn't change the chord
+  if (total === candidate) stable++; else { candidate = total; stable = 1; }
+  if (stable >= 4 && candidate !== committed) {
+    committed = candidate;
+    playChord(committed);
+    updateLabels();
+  }
+  $('hCount').textContent = total;
+}
+
+function updateLabels() {
+  document.querySelectorAll('.step').forEach(e => e.classList.remove('on'));
+  if (committed === 0) { $('big').textContent = '–'; $('hChord').textContent = '–'; return; }
+  const idx = (committed - 1) % 7;
+  $('step' + idx).classList.add('on');
+  $('big').textContent = NUMERALS[idx];
+  $('hChord').textContent = NAMES[(keyOffset() + SCALE[idx]) % 12] + SUFFIX[idx];
+}
+$('key').onchange = () => { if (ctx && committed) { playChord(committed); updateLabels(); } };
+
+// ---------- yellow waveform ----------
+function drawWave() {
+  requestAnimationFrame(drawWave);
+  const w = wave.clientWidth, h = wave.clientHeight;
+  if (wave.width !== w) { wave.width = w; wave.height = h; }
+  wg.clearRect(0, 0, w, h);
+  wg.lineWidth = 3; wg.strokeStyle = '#ffd400'; wg.shadowColor = '#ffb300'; wg.shadowBlur = 12;
+  wg.beginPath();
+  if (!analyser) { wg.moveTo(0, h / 2); wg.lineTo(w, h / 2); wg.stroke(); return; }
+  const data = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(data);
+  for (let i = 0; i < data.length; i++) {
+    const x = (i / (data.length - 1)) * w;
+    const y = h / 2 + ((data[i] - 128) / 128) * h * 0.9;
+    i ? wg.lineTo(x, y) : wg.moveTo(x, y);
+  }
+  wg.stroke();
+}
+drawWave();
+
+// ---------- start ----------
+$('start').onclick = async () => {
+  try {
+    initAudio();
+    await ctx.resume();
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    video.srcObject = stream;
+    await video.play();
+    $('start').remove();
+
+    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
+    hands.onResults(onResults);
+    const loop = async () => {
+      if (video.readyState >= 2) await hands.send({ image: video });
+      requestAnimationFrame(loop);
+    };
+    loop();
+  } catch (e) {
+    $('msg').textContent = 'Could not start: ' + e.message;
+    console.error(e);
+  }
+};
+</script>
+</body>
+</html>
